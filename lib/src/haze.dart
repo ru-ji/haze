@@ -88,7 +88,7 @@ class Haze extends StatefulWidget {
   State<Haze> createState() => _HazeState();
 }
 
-class _HazeState extends State<Haze> {
+class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
   static const String _shaderAsset = 'packages/haze/shaders/haze.frag';
 
   static ui.FragmentProgram? _cachedProgram;
@@ -103,9 +103,18 @@ class _HazeState extends State<Haze> {
   /// page — see [_onRouteTick].
   final GlobalKey _blurKey = GlobalKey();
 
+  /// Ramps the sigma back up when a route transition ends, so the blur eases
+  /// in instead of popping the moment the page lands.
+  late final AnimationController _fadeIn;
+
   @override
   void initState() {
     super.initState();
+    _fadeIn = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+      value: 1,
+    );
     final program = _cachedProgram;
     if (program != null) {
       _horizontalPass = program.fragmentShader();
@@ -170,11 +179,17 @@ class _HazeState extends State<Haze> {
         _moving(_route?.animation) || _moving(_route?.secondaryAnimation);
     if (transitioning != _transitioning && mounted) {
       setState(() => _transitioning = transitioning);
+      if (transitioning) {
+        _fadeIn.value = 0;
+      } else {
+        _fadeIn.forward();
+      }
     }
   }
 
   @override
   void dispose() {
+    _fadeIn.dispose();
     _detachRouteListeners();
     _horizontalPass?.dispose();
     _verticalPass?.dispose();
@@ -234,21 +249,23 @@ class _HazeState extends State<Haze> {
     // filter sampling a scene that is being transformed mid-flight picks up
     // the seam where the sliding page's backdrop ends — a hard line across
     // the effect. Nothing is scrolling during a transition anyway.
-    // ponytail: blur suppressed for the transition's duration; cross-fade it
-    // back in if the pop-in ever reads as abrupt.
+    // It eases back in over [_fadeIn] once the page lands, so it never pops.
     final content = Stack(
       fit: StackFit.expand,
       children: [
         if (blurred)
-          _ShaderHaze(
-            key: _blurKey,
-            horizontalPass: hPass,
-            verticalPass: vPass,
-            sigma: widget.sigma,
-            edge: widget.edge,
-            falloff: widget.falloff,
-            extent: widget.extent,
-            devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
+          AnimatedBuilder(
+            animation: _fadeIn,
+            builder: (context, _) => _ShaderHaze(
+              key: _blurKey,
+              horizontalPass: hPass,
+              verticalPass: vPass,
+              sigma: widget.sigma * _fadeIn.value,
+              edge: widget.edge,
+              falloff: widget.falloff,
+              extent: widget.extent,
+              devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
+            ),
           )
         else if (widget.sigma > 0 && !_transitioning)
           _SlicesFallback(

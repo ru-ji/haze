@@ -1,6 +1,7 @@
 name: haze
 description: "Progressive (gradient) blur for Flutter: a true variable-radius Gaussian that fades from any edge, with an optional matching tint wash."
 version: 0.1.0
+homepage: https://herme.se
 repository: https://github.com/ru-ji/haze
 
 environment:
