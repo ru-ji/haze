@@ -29,6 +29,7 @@ uniform vec2 u_area_size;      // 7,8 — effect rect size, device px
 uniform float u_edge;          // 9 — 0 top, 1 bottom, 2 left, 3 right
 uniform float u_power;         // 10 — falloff exponent (higher = tighter to the edge)
 uniform float u_extent;        // 11 — fraction of the area the falloff spans (0..1]
+uniform float u_plateau;       // 12 — fraction of the span held at FULL strength
 
 out vec4 frag_color;
 
@@ -50,9 +51,15 @@ void main() {
   float flip = mod(u_edge, 2.0);
   float edgeDist = clamp(mix(t, 1.0 - t, flip) / max(u_extent, 1.0e-3), 0.0, 1.0);
 
-  // Cosine falloff: full strength at the edge, easing to exactly zero with
-  // zero slope at the inner boundary, so the blur fades instead of stopping.
-  float falloff = pow(cos(edgeDist * HALF_PI), u_power);
+  // The system profile: a plateau at full strength off the edge, then a
+  // smootherstep decay — first AND second derivatives are zero at both the
+  // plateau's end and the far boundary, so neither where the fade begins nor
+  // where it dies is detectable. A cosine (the previous curve) leaves a
+  // non-zero slope at the far end at low powers, which reads as a line where
+  // the effect stops.
+  float x = clamp((edgeDist - u_plateau) / max(1.0 - u_plateau, 1.0e-3), 0.0, 1.0);
+  float s = 1.0 - x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
+  float falloff = pow(s, u_power);
 
   float sigma = u_blur_sigma * falloff;
   if (sigma < MIN_SIGMA) {
@@ -103,5 +110,18 @@ void main() {
     }
   }
 
-  frag_color = totalColor / max(totalWeight, MIN_WEIGHT);
+  vec4 blurred = totalColor / max(totalWeight, MIN_WEIGHT);
+
+  // Sigma reaching zero smoothly is necessary but not sufficient. Perceived
+  // sharpness is not linear in sigma: a hard content edge reads as "soft"
+  // above sigma ~1 and snaps back to "sharp" just under it, so along the tail
+  // of the falloff the IMAGE changes faster than sigma does — which is the
+  // visible line where blurred content meets sharp content, cutting whatever
+  // straddles it in two. The tint never has this problem because it fades in
+  // OUTPUT space (alpha), not in parameter space. Do the same for the blur:
+  // cross-fade the blurred image back into the backdrop over the tail, so
+  // the output converges to the backdrop exactly the way the tint's alpha
+  // converges to zero.
+  float keep = smoothstep(0.02, 0.30, falloff);
+  frag_color = mix(bg, blurred, keep);
 }
