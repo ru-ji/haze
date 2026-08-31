@@ -7,9 +7,22 @@ import 'package:flutter/widgets.dart';
 /// Which edge of the [Haze] rectangle the blur is strongest at.
 enum HazeEdge { top, bottom, left, right }
 
-/// A progressive (gradient) blur: a true variable-radius Gaussian over the
-/// backdrop, strongest at one edge and fading continuously to nothing at the
-/// other — plus an optional tint wash on the exact same falloff.
+/// A progressive (gradient) blur: a Gaussian over the backdrop, full strength
+/// at one edge and dissolving to nothing at the other — plus an optional tint
+/// wash on the exact same falloff.
+///
+/// The blur is untouched from 0.1.1 — cosine falloff, linear sigma, 3-sigma
+/// radius, one tap per texel. Several "improvements" were measured against it
+/// (a plateau, a smootherstep tail, exponential shaping of sigma, bilinear
+/// tap pairing, cross-fading a fixed blur) and every one of them was worse in
+/// the hand.
+///
+/// Only the TINT's shape changed: it takes an optional [plateau] at full
+/// strength before its fade. An alpha can sit at full and then drop away with
+/// nothing to give the drop away; a blur held at full radius has to shed all
+/// of it in what is left of the span, and the moment the heavy blur ends
+/// becomes an edge of its own. What makes an alpha fade invisible is not what
+/// makes a radius ramp invisible.
 ///
 /// This is iOS 26's "scroll edge effect" as a standalone widget: put it in a
 /// [Stack] over an image, a scrolling list, or behind a navigation bar.
@@ -55,8 +68,8 @@ class Haze extends StatefulWidget {
   /// The edge the blur (and tint) is strongest at.
   final HazeEdge edge;
 
-  /// Peak blur radius at [edge], in logical pixels. Fades to 0 at the
-  /// opposite end of [extent].
+  /// Peak blur radius at [edge], in logical pixels. Falls to 0 along the
+  /// falloff.
   final double sigma;
 
   /// Colour of the wash painted on top of the blur, on the same falloff.
@@ -70,10 +83,16 @@ class Haze extends StatefulWidget {
   /// tighter to [edge]; lower values spread it further in.
   final double falloff;
 
-  /// Fraction of the falloff span held at FULL strength before the decay
-  /// begins, 0–1. This is the shape of iOS's scroll edge effect: constant
+  /// Fraction of the span the TINT is held at full strength before it starts
+  /// to fade, 0–1. This is the shape of iOS's scroll edge effect: constant
   /// over the bar itself, then a fade whose start is as undetectable as its
   /// end. 0 (the default) starts fading at the very edge.
+  ///
+  /// Tint only. The blur keeps the plain cosine falloff, and wants to: an
+  /// alpha can sit at full strength and then drop away with nothing to give
+  /// the drop away, but a blur held at full radius has to shed all of it in
+  /// whatever span is left, and the moment the heavy blur ends becomes an
+  /// edge of its own.
   final double plateau;
 
   /// Fraction of the widget the falloff spans, 0–1. 1 means the blur only
@@ -204,18 +223,19 @@ class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
     super.dispose();
   }
 
-  /// Plateau + smootherstep, the exact curve the shader runs — the two layers
-  /// must read as ONE effect, so they share one profile. Smootherstep's first
-  /// and second derivatives are zero at both ends: neither where the fade
-  /// begins nor where it dies is detectable.
+  /// The TINT's curve: an optional plateau at full strength, then a
+  /// smootherstep whose first and second derivatives are zero at both ends —
+  /// neither where the fade begins nor where it dies is detectable.
+  ///
+  /// The blur runs the shader's cosine instead, unchanged from 0.1.1.
   static double falloffAt(double t, double plateau, double power) {
     final x = ((t - plateau) / math.max(1 - plateau, 1e-3)).clamp(0.0, 1.0);
     final s = 1 - x * x * x * (x * (x * 6 - 15) + 10);
     return math.pow(s, power).toDouble();
   }
 
-  /// The tint wash, on the same profile as the shader blur — same plateau,
-  /// same exponent, same extent — so the two die together, boundary-free.
+  /// The tint wash: [plateau] then smootherstep, sharing the blur's exponent
+  /// and extent so the two still die together.
   Widget? _buildWash() {
     final tint = widget.tint;
     if (tint == null || widget.tintOpacity == 0) return null;
@@ -281,7 +301,6 @@ class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
               sigma: widget.sigma * _fadeIn.value,
               edge: widget.edge,
               falloff: widget.falloff,
-              plateau: widget.plateau,
               extent: widget.extent,
               devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
             ),
@@ -291,7 +310,6 @@ class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
             sigma: widget.sigma,
             edge: widget.edge,
             falloff: widget.falloff,
-            plateau: widget.plateau,
             extent: widget.extent,
           ),
         if (wash != null) IgnorePointer(child: wash),
@@ -313,14 +331,12 @@ class _SlicesFallback extends StatelessWidget {
     required this.sigma,
     required this.edge,
     required this.falloff,
-    required this.plateau,
     required this.extent,
   });
 
   final double sigma;
   final HazeEdge edge;
   final double falloff;
-  final double plateau;
   final double extent;
 
   static const int _slices = 8;
@@ -369,10 +385,10 @@ class _SlicesFallback extends StatelessWidget {
     );
   }
 
-  /// The shader's falloff sampled at the slice's center.
+  /// The shader's cosine falloff sampled at the slice's center.
   double _sigmaFor(int i) {
     final t = ((i + 0.5) / _slices / extent).clamp(0.0, 1.0);
-    return sigma * _HazeState.falloffAt(t, plateau, falloff);
+    return sigma * math.pow(math.cos(t * math.pi / 2), falloff).toDouble();
   }
 }
 
@@ -389,7 +405,6 @@ class _ShaderHaze extends LeafRenderObjectWidget {
     required this.sigma,
     required this.edge,
     required this.falloff,
-    required this.plateau,
     required this.extent,
     required this.devicePixelRatio,
   });
@@ -399,7 +414,6 @@ class _ShaderHaze extends LeafRenderObjectWidget {
   final double sigma;
   final HazeEdge edge;
   final double falloff;
-  final double plateau;
   final double extent;
   final double devicePixelRatio;
 
@@ -410,7 +424,6 @@ class _ShaderHaze extends LeafRenderObjectWidget {
     sigma: sigma,
     edge: edge,
     falloff: falloff,
-    plateau: plateau,
     extent: extent,
     devicePixelRatio: devicePixelRatio,
   );
@@ -426,7 +439,6 @@ class _ShaderHaze extends LeafRenderObjectWidget {
       ..sigma = sigma
       ..edge = edge
       ..falloff = falloff
-      ..plateau = plateau
       ..extent = extent
       ..devicePixelRatio = devicePixelRatio;
   }
@@ -439,7 +451,6 @@ class _RenderShaderHaze extends RenderBox {
     required double sigma,
     required HazeEdge edge,
     required double falloff,
-    required double plateau,
     required double extent,
     required double devicePixelRatio,
   }) : _horizontalPass = horizontalPass,
@@ -447,7 +458,6 @@ class _RenderShaderHaze extends RenderBox {
        _sigma = sigma,
        _edge = edge,
        _falloff = falloff,
-       _plateau = plateau,
        _extent = extent,
        _devicePixelRatio = devicePixelRatio;
 
@@ -486,13 +496,6 @@ class _RenderShaderHaze extends RenderBox {
     markNeedsPaint();
   }
 
-  double _plateau;
-  set plateau(double value) {
-    if (value == _plateau) return;
-    _plateau = value;
-    markNeedsPaint();
-  }
-
   double _extent;
   set extent(double value) {
     if (value == _extent) return;
@@ -516,7 +519,6 @@ class _RenderShaderHaze extends RenderBox {
       LayerHandle<BackdropFilterLayer>();
   final LayerHandle<BackdropFilterLayer> _verticalLayer =
       LayerHandle<BackdropFilterLayer>();
-  final LayerHandle<ClipRectLayer> _clipLayer = LayerHandle<ClipRectLayer>();
 
   @override
   bool get sizedByParent => true;
@@ -536,37 +538,6 @@ class _RenderShaderHaze extends RenderBox {
     _configure(_horizontalPass, 1, 0, bounds);
     _configure(_verticalPass, 0, 1, bounds);
 
-    // The filter layers cover only the span the falloff actually reaches.
-    // Past [extent] the shader is a guaranteed identity — but an identity
-    // FILTER and no filter are not the same thing to the engine: the covered
-    // region is snapshotted, run through the shader and written back, and
-    // the boundary of that round trip can show as a hairline. Left at the
-    // widget's own bottom it floated in the dead zone, a line hanging in
-    // clean content a few points below the fade; clipped to the terminus,
-    // every boundary sits where the effect is already nothing.
-    _clipLayer.layer = context.pushClipRect(
-      needsCompositing,
-      offset,
-      _activeSpan(),
-      _pushFilters,
-      oldLayer: _clipLayer.layer,
-    );
-  }
-
-  /// The part of the box the falloff actually covers, in local coordinates:
-  /// [extent] of the span, anchored at the hugged edge.
-  Rect _activeSpan() {
-    final w = size.width;
-    final h = size.height;
-    return switch (_edge) {
-      HazeEdge.top => Rect.fromLTWH(0, 0, w, h * _extent),
-      HazeEdge.bottom => Rect.fromLTWH(0, h * (1 - _extent), w, h * _extent),
-      HazeEdge.left => Rect.fromLTWH(0, 0, w * _extent, h),
-      HazeEdge.right => Rect.fromLTWH(w * (1 - _extent), 0, w * _extent, h),
-    };
-  }
-
-  void _pushFilters(PaintingContext context, Offset offset) {
     final horizontalLayer = _horizontalLayer.layer ??= BackdropFilterLayer();
     horizontalLayer.filter = ui.ImageFilter.shader(_horizontalPass);
     context.pushLayer(horizontalLayer, _paintNothing, offset);
@@ -596,15 +567,13 @@ class _RenderShaderHaze extends RenderBox {
       ..setFloat(8, bounds.height * dpr)
       ..setFloat(9, _edge.index.toDouble())
       ..setFloat(10, _falloff)
-      ..setFloat(11, _extent)
-      ..setFloat(12, _plateau);
+      ..setFloat(11, _extent);
   }
 
   @override
   void dispose() {
     _horizontalLayer.layer = null;
     _verticalLayer.layer = null;
-    _clipLayer.layer = null;
     super.dispose();
   }
 }
