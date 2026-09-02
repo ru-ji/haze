@@ -241,7 +241,7 @@ class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
     if (tint == null || widget.tintOpacity == 0) return null;
     // Enough steps that the gradient's own quantisation can't reintroduce
     // the banding the curve exists to remove.
-    const steps = 28;
+    const steps = 30;
     double alphaAt(double t) =>
         widget.tintOpacity * falloffAt(t, widget.plateau, widget.falloff);
     final (begin, end) = switch (widget.edge) {
