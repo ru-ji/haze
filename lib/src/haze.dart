@@ -11,11 +11,11 @@ enum HazeEdge { top, bottom, left, right }
 /// at one edge and dissolving to nothing at the other — plus an optional tint
 /// wash on the exact same falloff.
 ///
-/// The blur is untouched from 0.1.1 — cosine falloff, linear sigma, 3-sigma
-/// radius, one tap per texel. Several "improvements" were measured against it
-/// (a plateau, a smootherstep tail, exponential shaping of sigma, bilinear
-/// tap pairing, cross-fading a fixed blur) and every one of them was worse in
-/// the hand.
+/// Sigma falls off on a smootherstep: full at [edge], zero at the inner
+/// boundary with zero slope AND zero curvature there, so nothing marks where
+/// the blur ends. The cosine it replaced (0.1.1) reached zero as well, but on
+/// a straight slope — a text line crossing the last tenth of the span came
+/// back blurred at the top and crisp at the bottom.
 ///
 /// Only the TINT's shape changed: it takes an optional [plateau] at full
 /// strength before its fade. An alpha can sit at full and then drop away with
@@ -79,7 +79,7 @@ class Haze extends StatefulWidget {
   /// Peak opacity of [tint] at [edge].
   final double tintOpacity;
 
-  /// Falloff exponent. 1 is a plain cosine; higher values keep the blur
+  /// Falloff exponent. 1 is the bare smootherstep; higher values keep the blur
   /// tighter to [edge]; lower values spread it further in.
   final double falloff;
 
@@ -88,7 +88,7 @@ class Haze extends StatefulWidget {
   /// over the bar itself, then a fade whose start is as undetectable as its
   /// end. 0 (the default) starts fading at the very edge.
   ///
-  /// Tint only. The blur keeps the plain cosine falloff, and wants to: an
+  /// Tint only. The blur takes no plateau, and wants none: an
   /// alpha can sit at full strength and then drop away with nothing to give
   /// the drop away, but a blur held at full radius has to shed all of it in
   /// whatever span is left, and the moment the heavy blur ends becomes an
@@ -227,11 +227,14 @@ class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
   /// smootherstep whose first and second derivatives are zero at both ends —
   /// neither where the fade begins nor where it dies is detectable.
   ///
-  /// The blur runs the shader's cosine instead, unchanged from 0.1.1.
+  /// The blur runs the same curve in the shader, without the plateau.
   static double falloffAt(double t, double plateau, double power) {
     final x = ((t - plateau) / math.max(1 - plateau, 1e-3)).clamp(0.0, 1.0);
     final s = 1 - x * x * x * (x * (x * 6 - 15) + 10);
-    return math.pow(s, power).toDouble();
+    // Clamped for the same reason the shader clamps: the polynomial can round
+    // a hair past 1 at the boundary, and a negative base under pow() is a NaN
+    // there.
+    return math.pow(math.max(s, 0.0), power).toDouble();
   }
 
   /// The tint wash: [plateau] then smootherstep, sharing the blur's exponent
@@ -385,10 +388,10 @@ class _SlicesFallback extends StatelessWidget {
     );
   }
 
-  /// The shader's cosine falloff sampled at the slice's center.
+  /// The shader's falloff sampled at the slice's center.
   double _sigmaFor(int i) {
     final t = ((i + 0.5) / _slices / extent).clamp(0.0, 1.0);
-    return sigma * math.pow(math.cos(t * math.pi / 2), falloff).toDouble();
+    return sigma * _HazeState.falloffAt(t, 0, falloff);
   }
 }
 

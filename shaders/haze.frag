@@ -17,7 +17,6 @@
 
 #define MIN_SIGMA 1.0e-2
 #define MIN_WEIGHT 1.0e-5
-#define HALF_PI 1.5707963
 
 uniform vec2 u_size;           // floats 0,1 — filled by the engine
 uniform sampler2D u_texture;   // sampler 0 — the backdrop, bound by the engine
@@ -50,12 +49,28 @@ void main() {
   float flip = mod(u_edge, 2.0);
   float edgeDist = clamp(mix(t, 1.0 - t, flip) / max(u_extent, 1.0e-3), 0.0, 1.0);
 
-  // Cosine falloff: full strength at the edge, easing to exactly zero with
-  // zero slope at the inner boundary, so the blur fades instead of stopping.
-  float falloff = pow(cos(edgeDist * HALF_PI), u_power);
+  // Smootherstep falloff: full strength at the edge, easing to exactly zero
+  // with zero FIRST AND SECOND derivative at the inner boundary, so the blur
+  // dies instead of stopping. A cosine gets to zero too, but on a straight
+  // slope — it still carries a sigma of ~2 at 90% of the span and sheds it
+  // over the last few points, and a text line crossing there comes back
+  // blurred on top and crisp on the bottom. The eye reads the end of a ramp,
+  // not its value.
+  float s = 1.0 - edgeDist * edgeDist * edgeDist *
+                 (edgeDist * (edgeDist * 6.0 - 15.0) + 10.0);
+  // Clamped, and the guard below is written NaN-safe, for the same one reason:
+  // the polynomial is 1 at the inner boundary in exact arithmetic and can
+  // round a hair past it in float, and pow() of a negative base is UNDEFINED
+  // in GLSL. The NaN it returns on a real GPU fails `sigma < MIN_SIGMA`, so
+  // the tap loop runs with NaN weights and the row comes out black — one
+  // pure-black scanline straight across the effect, at the pixel where the
+  // blur is meant to be exactly zero. (The cosine this replaced was immune by
+  // accident: HALF_PI was truncated just below pi/2, so it never went
+  // negative.)
+  float falloff = pow(max(s, 0.0), u_power);
 
   float sigma = u_blur_sigma * falloff;
-  if (sigma < MIN_SIGMA) {
+  if (!(sigma >= MIN_SIGMA)) {
     frag_color = bg;
     return;
   }
