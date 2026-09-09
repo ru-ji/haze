@@ -1,3 +1,62 @@
+## 0.4.4
+
+* **`debugProfile: true`** paints the two profiles instead of the effect — red
+  the sigma's, green the scrim's — so a curve problem can be told apart from a
+  coordinate one by looking. Both must reach black exactly at the rectangle's
+  far side.
+
+## 0.4.3
+
+* **The line at the start of the fade is gone.** `falloff` warped the position
+  along the ramp with `pow(d, 1 / falloff)`, which has an infinite derivative
+  at the junction, and the smootherstep could not absorb it: the composed
+  profile is about `d^(3/falloff)` there, whose second derivative vanishes only
+  below 1.5, sits at a non-zero constant AT 1.5 — the default — and diverges
+  above it. A curvature break on a slow ramp is a Mach band, so every band
+  drawn at the default settings had a faint line across it exactly where the
+  plateau gave way, which read as the hard start of a plain `BackdropFilter`.
+  The warp is a rational bias now: same endpoints, same shape between them,
+  finite non-zero derivatives at both ends, so the smootherstep's zero first
+  and second derivative survive at the start of the fade as well as at its
+  death. It is also cheaper than `pow`.
+
+  `falloff` values away from 1 cost slightly less transition width than they
+  used to, so `fadeRoom` and the plateau ceiling are a little more generous.
+
+## 0.4.2
+
+* **The kernel only walls off the hugged edge now.** It was masked to the
+  widget's rectangle on all four sides and renormalized, so a pixel in the
+  middle of a band could not sample the page below it: the average leaned
+  toward the edge, the band came out lighter than the untouched pixels just
+  outside it, and the difference landed on a straight line at the far side —
+  the exact artifact the widget exists to avoid. The one-sided kernel also
+  dragged nearby content along the pass direction, which read as streaks.
+  Only the hugged edge is a real boundary; the other three sample freely.
+
+## 0.4.1
+
+Two ways a band could still show a visible edge, and the number that prevents
+the second one.
+
+* **`blurPlateau` is now bound by the same ceiling as `plateau`.** It was going
+  to the shader raw, so a caller could hold the sigma over more of the
+  rectangle than the fade had room for — the one combination of knobs left that
+  produced a block with a findable edge. `Haze.resolve` scales both, and
+  constrains the sigma with whichever holds longest. It returns a third value.
+
+* **`plateau: 1` is now legal**, and is the value to reach for. The assert
+  rejecting it dated from when the value went to the shader raw, where 1 meant
+  no fade at all; it is read as a fraction of the affordable room now, so 1 is
+  the safest value there is rather than the worst.
+
+* **`Haze.fadeRoom(sigma, [falloff])`**, the span a band needs BEYOND the
+  chrome it covers. Too short a rectangle is the one thing the widget cannot
+  fix for you: it keeps the effect smooth by shortening the plateau, which
+  leaves your bar sitting on the ramp — a bar you can see through. Size the
+  rectangle at `chrome + fadeRoom(sigma)`, pass `plateau: 1`, and the plateau
+  lands exactly on the chrome's edge.
+
 ## 0.4.0
 
 The tint moved into the shader, and gained the option of reading the backdrop.

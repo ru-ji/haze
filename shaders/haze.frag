@@ -35,6 +35,7 @@ uniform float u_blur_curve;    // 12 — perceptual exponent on the SIGMA only (
 uniform vec4 u_tint;           // 13,14,15,16 — scrim colour (sRGB 0..1) + peak alpha
 uniform float u_tint_adapt;    // 17 — 0 flat alpha, 1 derived from the backdrop's luminance
 uniform float u_blur_plateau;  // 18 — the SIGMA's plateau; u_plateau is the scrim's
+uniform float u_debug;         // 19 — >0.5 paints the profiles instead of the effect
 
 // The adaptive law, measured off iOS 26's own scroll edge effect by sampling a
 // pixel column of a screen recording over flat bands (dark mode, so the scrim
@@ -70,7 +71,7 @@ out vec4 frag_color;
 // Full strength over the first `plateau` of the span, then a smootherstep to
 // exactly zero at the inner boundary.
 //
-// The exponent warps the POSITION, never the result. Applied on the way out —
+// The shape knob warps the POSITION, never the result. Applied on the way out —
 // pow(s, p) — it destroys the very property the smootherstep is here for:
 // d/dx s^p = p * s^(p-1) * s', and s^(p-1) diverges as s reaches 0, so any
 // p < 1 turns the zero-slope death into a vertical drop. The effect then ends
@@ -85,7 +86,19 @@ out vec4 frag_color;
 // The eye reads the end of a ramp, not its value.
 float profile(float edgeDist, float plateau) {
   float d = clamp((edgeDist - plateau) / max(1.0 - plateau, 1.0e-3), 0.0, 1.0);
-  float x = pow(max(d, 0.0), 1.0 / u_power);
+  // The warp is a rational bias, NOT pow(d, 1/power). Both send 0 to 0 and 1
+  // to 1 with the same shape between, but pow has an infinite derivative at
+  // one end, and the smootherstep cannot absorb it: composing d^(1/p) into it
+  // gives a profile of roughly d^(3/p) at the plateau junction, whose second
+  // derivative is zero only while p < 1.5, jumps to a constant AT 1.5 — the
+  // default — and diverges above it. A curvature break on a slow ramp is a
+  // Mach band: the eye reads a line exactly where the effect starts to let go,
+  // which looks like the hard start of a plain BackdropFilter.
+  //
+  // This one has finite, non-zero derivatives at both ends for every power, so
+  // the smootherstep's zero first AND second derivative survive at the start
+  // of the fade as well as at its death. It is also cheaper than pow.
+  float x = u_power * d / (1.0 + (u_power - 1.0) * d);
   return 1.0 - x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
 }
 
@@ -124,6 +137,29 @@ void main() {
   vec2 areaTopLeftUV = u_area_origin / u_size;
   vec2 areaBottomRightUV = (u_area_origin + u_area_size) / u_size;
 
+  // Where the kernel is allowed to reach. Only ONE side of the rectangle is a
+  // real boundary: the hugged edge, past which there is nothing belonging to
+  // this effect (it is against the top of the screen, or against the seam a
+  // sliding page leaves). The other three are just where the effect stops
+  // being drawn — the page continues there, and a blur that refuses to sample
+  // it renormalizes over a one-sided kernel: the band averages only what lies
+  // toward the edge, so it comes out brighter or darker than the untouched
+  // pixels immediately outside, and the difference lands on a straight line at
+  // the rectangle's far side. That line is the thing this widget exists to not
+  // have. The same one-sidedness drags whatever is near the boundary along the
+  // pass direction, which reads as streaks.
+  vec2 lo = vec2(0.0);
+  vec2 hi = vec2(1.0);
+  if (u_edge < 0.5) {
+    lo.y = areaTopLeftUV.y;
+  } else if (u_edge < 1.5) {
+    hi.y = areaBottomRightUV.y;
+  } else if (u_edge < 2.5) {
+    lo.x = areaTopLeftUV.x;
+  } else {
+    hi.x = areaBottomRightUV.x;
+  }
+
   vec4 bg = texture(u_texture, uv);
 
   // Normalized position inside the effect area along the falloff axis.
@@ -152,6 +188,17 @@ void main() {
   // here: for an exponent >= 1 the zero slope and curvature at the far side
   // survive (they do not for one below 1 — that is the cliff this file's
   // position-warping exists to avoid).
+  // Debug view: the two profiles, straight out, before anything samples
+  // anything. Red is the sigma's, green the scrim's, and both must reach black
+  // exactly at the rectangle's far side. Anything else — a band of flat colour
+  // ending abruptly, a seam, colour outside the rectangle — is a coordinate
+  // problem and not a curve problem, and this is the only way to tell the two
+  // apart by looking.
+  if (u_debug > 0.5) {
+    frag_color = vec4(blurFalloff, falloff, 0.0, 1.0);
+    return;
+  }
+
   float sigma = u_blur_sigma * pow(max(blurFalloff, 0.0), u_blur_curve);
   if (!(sigma >= MIN_SIGMA)) {
     // Past the blur's reach the scrim can still be on — they share a profile
@@ -186,15 +233,13 @@ void main() {
       vec2 uvRaw2 = uv - offset;
 
       // Taps outside the effect area contribute nothing.
-      float mask1 =
-          step(areaTopLeftUV.x, uvRaw1.x) * step(uvRaw1.x, areaBottomRightUV.x) *
-          step(areaTopLeftUV.y, uvRaw1.y) * step(uvRaw1.y, areaBottomRightUV.y);
-      float mask2 =
-          step(areaTopLeftUV.x, uvRaw2.x) * step(uvRaw2.x, areaBottomRightUV.x) *
-          step(areaTopLeftUV.y, uvRaw2.y) * step(uvRaw2.y, areaBottomRightUV.y);
+      float mask1 = step(lo.x, uvRaw1.x) * step(uvRaw1.x, hi.x) *
+                    step(lo.y, uvRaw1.y) * step(uvRaw1.y, hi.y);
+      float mask2 = step(lo.x, uvRaw2.x) * step(uvRaw2.x, hi.x) *
+                    step(lo.y, uvRaw2.y) * step(uvRaw2.y, hi.y);
 
-      vec2 uv1 = clamp(uvRaw1, areaTopLeftUV, areaBottomRightUV);
-      vec2 uv2 = clamp(uvRaw2, areaTopLeftUV, areaBottomRightUV);
+      vec2 uv1 = clamp(uvRaw1, lo, hi);
+      vec2 uv2 = clamp(uvRaw2, lo, hi);
 
       float w1 = weight * mask1;
       float w2 = weight * mask2;

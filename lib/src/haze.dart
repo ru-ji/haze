@@ -58,15 +58,20 @@ class Haze extends StatefulWidget {
     this.blurCurve = 2.0,
     this.borderRadius,
     this.enabled = true,
+    this.debugProfile = false,
     this.child,
   }) : assert(sigma >= 0),
        assert(falloff > 0),
-       assert(plateau >= 0 && plateau < 1),
+       // 1 is legal, and is the recommended value: these are fractions of
+       // the room the rectangle actually has, not of the rectangle. See
+       // [Haze.resolve] — 1 asks for the longest hold that still leaves a
+       // legal fade, never for a block.
+       assert(plateau >= 0 && plateau <= 1),
        assert(blurCurve >= 1),
        assert(tintOpacity >= 0 && tintOpacity <= 1),
        assert(tintAdaptivity >= 0 && tintAdaptivity <= 1),
        assert(
-         blurPlateau == null || (blurPlateau >= 0 && blurPlateau < 1),
+         blurPlateau == null || (blurPlateau >= 0 && blurPlateau <= 1),
        );
 
   /// The edge the blur (and tint) is strongest at.
@@ -158,6 +163,17 @@ class Haze extends StatefulWidget {
   /// widget out, and keeps layout identical.
   final bool enabled;
 
+  /// Paints the two profiles instead of the effect: red is the sigma's, green
+  /// the scrim's. Both must reach black exactly at the rectangle's far side.
+  ///
+  /// For telling a curve problem from a coordinate problem, which look alike
+  /// through a blur. A flat band that ends abruptly, a seam, or colour outside
+  /// the rectangle means the shader's idea of where the rectangle is does not
+  /// match where it is drawn — nothing about the ramp can fix that. A smooth
+  /// red-to-black that dies at the far side means the profile is fine and the
+  /// artifact is in the sampling.
+  final bool debugProfile;
+
   /// Painted above the effect, e.g. the text the blur exists to make legible.
   final Widget? child;
 
@@ -172,11 +188,28 @@ class Haze extends StatefulWidget {
   /// eyeballing it.
   static double falloffAt(double t, double plateau, double power) {
     final d = ((t - plateau) / math.max(1 - plateau, 1e-3)).clamp(0.0, 1.0);
-    // The exponent warps the position, not the result — see the shader: on the
-    // result it would make any power below 1 end on a vertical drop.
-    final x = math.pow(d, 1 / power).toDouble();
+    final x = _warp(d, power);
     return (1 - x * x * x * (x * (x * 6 - 15) + 10)).clamp(0.0, 1.0);
   }
+
+  /// [falloff] applied to the POSITION along the ramp, never to the result —
+  /// on the result it would make any power below 1 end on a vertical drop.
+  ///
+  /// A rational bias rather than `pow(d, 1 / power)`: same endpoints, same
+  /// shape between them, but finite non-zero derivatives at both ends. `pow`
+  /// has an infinite one, and the smootherstep cannot absorb it — the composed
+  /// profile is about `d^(3/power)` at the plateau junction, whose second
+  /// derivative vanishes only below 1.5, is a non-zero constant AT 1.5, and
+  /// diverges above it. That curvature break is a Mach band: a line at the
+  /// exact place the effect starts to let go. See the shader, which is where
+  /// this actually runs.
+  static double _warp(double d, double power) =>
+      power * d / (1 + (power - 1) * d);
+
+  /// The position that reaches [x] after [_warp] — the same curve read
+  /// backwards, for working out how much of the span a transition occupies.
+  static double _unwarp(double x, double power) =>
+      x / (power - (power - 1) * x);
 
   /// The adaptive scrim's alpha for a backdrop whose luminance sits
   /// [distance] away from the tint's, on 0..1.
@@ -209,12 +242,27 @@ class Haze extends StatefulWidget {
   /// strong to gone, for a given [plateau] and [falloff].
   ///
   /// Not the same thing as `1 - plateau`, and the difference is the point: the
-  /// FALLOFF squeezes the transition too. The factor peaks at 0.51 for
-  /// `falloff: 1` and collapses at both ends — 0.33 at 0.4, 0.32 at 4 — so a
-  /// low falloff produces the same hard-edged block a big plateau does.
+  /// FALLOFF squeezes the transition too, so a falloff far from 1 produces the
+  /// same hard-edged block a big plateau does, and both have to be paid for
+  /// out of the same span.
   static double transitionFraction(double plateau, double falloff) =>
-      (1 - plateau) *
-      (math.pow(_in10, falloff) - math.pow(_in90, falloff)).toDouble();
+      (1 - plateau) * (_unwarp(_in10, falloff) - _unwarp(_in90, falloff));
+
+  /// The room a band needs BEYOND the chrome it covers, in logical pixels, for
+  /// that chrome to sit at full strength and the fade to still be legal.
+  ///
+  /// The inverse of [plateauCeiling]: holding a plateau of `p` needs
+  /// `3 * sigma / transition` of span past it, and this is that number. Put a
+  /// 52pt bar in a rectangle of `52 + fadeRoom(sigma)` and ask for
+  /// `52 / height` — nothing gets scaled down, the bar is uniformly blurred,
+  /// and the ramp happens below it in open space.
+  ///
+  /// Too short a rectangle is the one thing the widget cannot fix for the
+  /// caller: it will keep the effect smooth by shortening the plateau, so the
+  /// content ends up sitting on the ramp. That is what a bar you can see
+  /// through looks like.
+  static double fadeRoom(double sigma, [double falloff = 1.5]) =>
+      3 * sigma / transitionFraction(0, falloff);
 
   /// The largest [plateau] whose transition is still at least as wide as the
   /// blur's own reach, in [span] logical pixels. Comes out at or below 0 when
@@ -248,15 +296,23 @@ class Haze extends StatefulWidget {
   /// never a block. Clamping instead collapses every value above the ceiling
   /// onto one result, and that ceiling is exactly where the edge starts to
   /// show.
-  static (double sigma, double plateau) resolve(
+  /// [blurPlateau] rides the same ceiling, so the sigma's hold can never be
+  /// longer than the room the rectangle has either — that was the one way
+  /// left to get a block with a findable edge out of this widget.
+  static (double sigma, double plateau, double blurPlateau) resolve(
     double span,
     double sigma,
     double plateau,
-    double falloff,
-  ) {
+    double falloff, {
+    double? blurPlateau,
+  }) {
     final ceiling = plateauCeiling(span, sigma, falloff).clamp(0.0, 1.0);
     final p = plateau * ceiling;
-    return (math.min(sigma, sigmaCeiling(span, p, falloff)), p);
+    final bp = (blurPlateau ?? plateau) * ceiling;
+    // The BINDING plateau is whichever holds longest: the sigma has to fit the
+    // transition that is actually left, not the one the scrim left it.
+    final s = math.min(sigma, sigmaCeiling(span, math.max(p, bp), falloff));
+    return (s, p, bp);
   }
 
   @override
@@ -479,11 +535,12 @@ class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
     final effect = Positioned.fill(
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final (sigma, plateau) = Haze.resolve(
+          final (sigma, plateau, blurPlateau) = Haze.resolve(
             vertical ? constraints.maxHeight : constraints.maxWidth,
             widget.sigma,
             widget.plateau,
             widget.falloff,
+            blurPlateau: widget.blurPlateau,
           );
           // The shader paints the scrim itself when it is running: per pixel,
           // on the same curve as the sigma, and able to read the backdrop.
@@ -503,7 +560,7 @@ class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
                     edge: widget.edge,
                     falloff: widget.falloff,
                     plateau: plateau,
-                    blurPlateau: widget.blurPlateau ?? plateau,
+                    blurPlateau: blurPlateau,
                     blurCurve: widget.blurCurve,
                     tint: widget.tint,
                     // NOT scaled by [_fadeIn]: the fade exists so the blur
@@ -513,6 +570,7 @@ class _HazeState extends State<Haze> with SingleTickerProviderStateMixin {
                     // neither.
                     tintOpacity: widget.tintOpacity,
                     tintAdaptivity: widget.tintAdaptivity,
+                    debugProfile: widget.debugProfile,
                     devicePixelRatio: MediaQuery.devicePixelRatioOf(context),
                   ),
                 )
@@ -633,6 +691,7 @@ class _ShaderHaze extends LeafRenderObjectWidget {
     required this.tint,
     required this.tintOpacity,
     required this.tintAdaptivity,
+    required this.debugProfile,
     required this.devicePixelRatio,
   });
 
@@ -647,6 +706,7 @@ class _ShaderHaze extends LeafRenderObjectWidget {
   final Color? tint;
   final double tintOpacity;
   final double tintAdaptivity;
+  final bool debugProfile;
   final double devicePixelRatio;
 
   @override
@@ -662,6 +722,7 @@ class _ShaderHaze extends LeafRenderObjectWidget {
     tint: tint,
     tintOpacity: tintOpacity,
     tintAdaptivity: tintAdaptivity,
+    debugProfile: debugProfile,
     devicePixelRatio: devicePixelRatio,
   );
 
@@ -682,6 +743,7 @@ class _ShaderHaze extends LeafRenderObjectWidget {
       ..tint = tint
       ..tintOpacity = tintOpacity
       ..tintAdaptivity = tintAdaptivity
+      ..debugProfile = debugProfile
       ..devicePixelRatio = devicePixelRatio;
   }
 }
@@ -699,6 +761,7 @@ class _RenderShaderHaze extends RenderBox {
     required Color? tint,
     required double tintOpacity,
     required double tintAdaptivity,
+    required bool debugProfile,
     required double devicePixelRatio,
   }) : _horizontalPass = horizontalPass,
        _verticalPass = verticalPass,
@@ -711,6 +774,7 @@ class _RenderShaderHaze extends RenderBox {
        _tint = tint,
        _tintOpacity = tintOpacity,
        _tintAdaptivity = tintAdaptivity,
+       _debugProfile = debugProfile,
        _devicePixelRatio = devicePixelRatio;
 
   ui.FragmentShader _horizontalPass;
@@ -787,6 +851,13 @@ class _RenderShaderHaze extends RenderBox {
   set tintAdaptivity(double value) {
     if (value == _tintAdaptivity) return;
     _tintAdaptivity = value;
+    markNeedsPaint();
+  }
+
+  bool _debugProfile;
+  set debugProfile(bool value) {
+    if (value == _debugProfile) return;
+    _debugProfile = value;
     markNeedsPaint();
   }
 
@@ -871,7 +942,10 @@ class _RenderShaderHaze extends RenderBox {
       // anywhere else in Flutter.
       ..setFloat(16, tint == null ? 0 : _tintOpacity * tint.a)
       ..setFloat(17, _tintAdaptivity)
-      ..setFloat(18, _blurPlateau);
+      ..setFloat(18, _blurPlateau)
+      // Only the vertical pass: the horizontal one would paint the profile and
+      // the vertical one would then blur it into a gradient of a gradient.
+      ..setFloat(19, scrim && _debugProfile ? 1 : 0);
   }
 
   @override

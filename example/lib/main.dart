@@ -3,147 +3,126 @@ import 'dart:ui' as ui;
 import 'package:flutter/cupertino.dart';
 import 'package:haze/haze.dart';
 
-import 'photos.dart';
-import 'profile_curve.dart';
+import 'album.dart';
 
-void main() => runApp(const HazeStudioApp());
+void main() => runApp(const HazeExampleApp());
 
-/// Widest the controls ever get — on the web the panel centres inside this
-/// instead of stretching a phone layout across a desktop.
-const double kPanelWidth = 560;
+const accent = Color(0xFFFA2B56);
+const kNavBarHeight = 52.0;
+const kMiniPlayerHeight = 64.0;
+const kTabBarHeight = 54.0;
 
-class HazeStudioApp extends StatelessWidget {
-  const HazeStudioApp({super.key});
+const kSigma = 10.0;
+
+/// Room the band keeps for the fade, below the chrome it covers. The bar rides
+/// the full-strength part, the ramp happens in the empty space under it.
+/// `Haze.fadeRoom(sigma)` computes the smallest value that works; 60 is that
+/// for a sigma of 10 (60.7), rounded up.
+const kFade = 64.0;
+const hairline = Color(0x1FFFFFFF);
+
+class HazeExampleApp extends StatelessWidget {
+  const HazeExampleApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    // Committed to dark: the whole point on screen is a light effect eating
-    // into a photograph, and a light chrome competes with it.
     return const CupertinoApp(
       title: 'Haze',
-      theme: CupertinoThemeData(brightness: Brightness.dark),
-      home: StudioPage(),
+      debugShowCheckedModeBanner: false,
+      theme: CupertinoThemeData(
+        brightness: Brightness.dark,
+        primaryColor: accent,
+        scaffoldBackgroundColor: Color(0xFF000000),
+      ),
+      home: AlbumPage(),
     );
   }
 }
 
-/// Which technique paints the top band. The comparison is the example: both
-/// sides get the same sigma and the same tint, and only one of them has an
-/// edge you can find.
-enum Technique { haze, plain }
-
-class StudioPage extends StatefulWidget {
-  const StudioPage({super.key});
+/// An album screen, close enough to the system one that the only thing left to
+/// look at is the two bands: content passing under the bar at the top and the
+/// player at the bottom, blurred harder the closer it gets to the edge.
+class AlbumPage extends StatefulWidget {
+  const AlbumPage({super.key});
 
   @override
-  State<StudioPage> createState() => _StudioPageState();
+  State<AlbumPage> createState() => _AlbumPageState();
 }
 
-class _StudioPageState extends State<StudioPage> {
-  Technique _technique = Technique.haze;
-  double _height = 200;
-  double _sigma = 18;
-  double _plateau = 0.18;
-  double _falloff = 1.0;
-  double _blurCurve = 2.0;
-  double _tintOpacity = 0.5;
-  int _photo = 0;
+class _AlbumPageState extends State<AlbumPage> {
+  final _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final tint = CupertinoColors.black;
-    // What the widget will actually paint. Shown in the panel and plotted in
-    // the curve, so the readout never claims something the rectangle refused.
-    final (effectiveSigma, effectivePlateau) = Haze.resolve(
-      _height,
-      _sigma,
-      _plateau,
-      _falloff,
-    );
+    final inset = MediaQuery.paddingOf(context);
+    // The chrome, and the band that covers it plus its fade.
+    final topChrome = inset.top + kNavBarHeight;
+    final bottomChrome = inset.bottom + kMiniPlayerHeight + kTabBarHeight;
 
     return CupertinoPageScaffold(
-      backgroundColor: CupertinoColors.black,
       child: Stack(
         children: [
-          // The subject. Swipeable, because a single photo makes it too easy
-          // to tune the effect to one image.
-          PageView.builder(
-            itemCount: photos.length,
-            onPageChanged: (i) => setState(() => _photo = i),
-            itemBuilder: (context, i) =>
-                PhotoImage(photo: photos[i], fit: BoxFit.cover),
+          const _Ambience(),
+          CustomScrollView(
+            controller: _scroll,
+            slivers: [
+              // The list runs the full height of the screen and slides under
+              // both bands; the padding is only what keeps its two ends
+              // reachable.
+              SliverPadding(
+                padding: EdgeInsets.only(top: topChrome),
+                sliver: const SliverToBoxAdapter(child: _AlbumHeader()),
+              ),
+              SliverList.builder(
+                itemCount: tracks.length,
+                itemBuilder: (context, i) =>
+                    _TrackRow(index: i, track: tracks[i]),
+              ),
+              SliverPadding(
+                padding: EdgeInsets.only(bottom: bottomChrome + 28),
+                sliver: const SliverToBoxAdapter(child: _AlbumFooter()),
+              ),
+            ],
           ),
-
           Positioned(
             top: 0,
             left: 0,
             right: 0,
-            height: _height,
-            child: IgnorePointer(
-              child: switch (_technique) {
-                Technique.haze => Haze(
-                  edge: HazeEdge.top,
-                  sigma: _sigma,
-                  plateau: _plateau,
-                  falloff: _falloff,
-                  blurCurve: _blurCurve,
-                  tint: tint,
-                  tintOpacity: _tintOpacity,
-                  child: _Header(photo: photos[_photo]),
-                ),
-                // The ordinary way, for contrast: one uniform blur behind one
-                // flat scrim, clipped. Same numbers, and the rectangle draws
-                // itself across the photograph.
-                Technique.plain => ClipRect(
-                  child: BackdropFilter(
-                    filter: ui.ImageFilter.blur(sigmaX: _sigma, sigmaY: _sigma),
-                    child: ColoredBox(
-                      color: tint.withValues(alpha: _tintOpacity),
-                      child: _Header(photo: photos[_photo]),
-                    ),
-                  ),
-                ),
-              },
+            height: topChrome + kFade,
+            child: Haze(
+              edge: HazeEdge.top,
+              sigma: kSigma,
+              // Hold as long as this rectangle can afford — which, with kFade
+              // of room under the bar, is exactly the bar.
+              plateau: .5,
+              tint: CupertinoColors.black,
+              tintOpacity: 0.3,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: _NavBar(scroll: _scroll, topInset: inset.top),
+              ),
             ),
           ),
-
-          // The controls ride a Haze of their own, so the panel is also a
-          // second instance of the thing being tuned.
           Positioned(
             left: 0,
             right: 0,
             bottom: 0,
+            height: bottomChrome + kFade,
             child: Haze(
               edge: HazeEdge.bottom,
-              sigma: 22,
-              plateau: 0.55,
+              sigma: kSigma - 5,
+              plateau: .6,
               tint: CupertinoColors.black,
-              tintOpacity: 0.62,
-              child: SafeArea(
-                top: false,
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: kPanelWidth),
-                    child: _Panel(
-                      technique: _technique,
-                      height: _height,
-                      sigma: _sigma,
-                      effectiveSigma: effectiveSigma,
-                      plateau: _plateau,
-                      effectivePlateau: effectivePlateau,
-                      falloff: _falloff,
-                      blurCurve: _blurCurve,
-                      tintOpacity: _tintOpacity,
-                      onTechnique: (v) => setState(() => _technique = v),
-                      onHeight: (v) => setState(() => _height = v),
-                      onSigma: (v) => setState(() => _sigma = v),
-                      onPlateau: (v) => setState(() => _plateau = v),
-                      onFalloff: (v) => setState(() => _falloff = v),
-                      onBlurCurve: (v) => setState(() => _blurCurve = v),
-                      onTintOpacity: (v) => setState(() => _tintOpacity = v),
-                    ),
-                  ),
-                ),
+              tintOpacity: 0.2,
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: _PlayerDock(bottomInset: inset.bottom),
               ),
             ),
           ),
@@ -153,39 +132,246 @@ class _StudioPageState extends State<StudioPage> {
   }
 }
 
-/// Title block inside the top band — text the effect exists to make legible.
-class _Header extends StatelessWidget {
-  const _Header({required this.photo});
-
-  final Photo photo;
+/// The sleeve, blown up and blurred behind the top of the page — the wash the
+/// system puts behind a now-playing screen, and something with real structure
+/// for the top band to eat into.
+class _Ambience extends StatelessWidget {
+  const _Ambience();
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      bottom: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(22, 6, 22, 0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      height: 480,
+      child: ImageFiltered(
+        imageFilter: ui.ImageFilter.blur(sigmaX: 48, sigmaY: 48),
+        child: ShaderMask(
+          blendMode: BlendMode.dstIn,
+          shaderCallback: (rect) => const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFFFFFFFF), Color(0x00FFFFFF)],
+            stops: [0.4, 1],
+          ).createShader(rect),
+          child: const Opacity(opacity: 0.7, child: Sleeve()),
+        ),
+      ),
+    );
+  }
+}
+
+class _NavBar extends StatelessWidget {
+  const _NavBar({required this.scroll, required this.topInset});
+
+  final ScrollController scroll;
+  final double topInset;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(top: topInset),
+      child: SizedBox(
+        height: kNavBarHeight,
+        child: Row(
           children: [
-            Text(
-              photo.place.toUpperCase(),
-              style: const TextStyle(
-                fontSize: 11,
-                letterSpacing: 1.8,
-                fontWeight: FontWeight.w600,
-                color: Color(0x8CFFFFFF),
+            CupertinoButton(
+              padding: const EdgeInsets.only(left: 6, right: 8),
+              minimumSize: const Size(44, 44),
+              onPressed: () {},
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(CupertinoIcons.back, size: 26, color: accent),
+                  Text(
+                    'Library',
+                    style: TextStyle(
+                      fontSize: 17,
+                      letterSpacing: -0.4,
+                      color: accent,
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 5),
+            Expanded(
+              child: AnimatedBuilder(
+                animation: scroll,
+                builder: (context, _) {
+                  // The title trades places with the sleeve: it fades in over
+                  // the stretch where the artwork leaves under the bar.
+                  final t = scroll.hasClients
+                      ? ((scroll.offset - 200) / 60).clamp(0.0, 1.0)
+                      : 0.0;
+                  return Opacity(
+                    opacity: t,
+                    child: Transform.translate(
+                      offset: Offset(0, (1 - t) * 10),
+                      child: const Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            albumTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: -0.3,
+                              color: CupertinoColors.white,
+                            ),
+                          ),
+                          Text(
+                            albumArtist,
+                            maxLines: 1,
+                            style: TextStyle(
+                              fontSize: 11,
+                              letterSpacing: -0.1,
+                              color: Color(0x99FFFFFF),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const _GlassButton(CupertinoIcons.shuffle),
+            const SizedBox(width: 8),
+            const _GlassButton(CupertinoIcons.ellipsis),
+            const SizedBox(width: 12),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The round translucent control the system puts in a bar over content.
+class _GlassButton extends StatelessWidget {
+  const _GlassButton(this.icon);
+
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () {},
+      child: Container(
+        width: 30,
+        height: 30,
+        alignment: Alignment.center,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color(0x24FFFFFF),
+        ),
+        child: Icon(icon, size: 15, color: CupertinoColors.white),
+      ),
+    );
+  }
+}
+
+class _AlbumHeader extends StatelessWidget {
+  const _AlbumHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    final side = (MediaQuery.sizeOf(context).width * 0.62).clamp(180.0, 290.0);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+      child: Column(
+        children: [
+          Container(
+            width: side,
+            height: side,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0xA6000000),
+                  blurRadius: 34,
+                  offset: Offset(0, 16),
+                ),
+              ],
+            ),
+            foregroundDecoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0x1AFFFFFF)),
+            ),
+            child: const Sleeve(),
+          ),
+          const SizedBox(height: 18),
+          const Text(
+            albumTitle,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
+              letterSpacing: -0.6,
+              color: CupertinoColors.white,
+            ),
+          ),
+          const SizedBox(height: 1),
+          const Text(
+            albumArtist,
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 22, letterSpacing: -0.6, color: accent),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            albumMeta,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.4,
+              color: Color(0x8CFFFFFF),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Row(
+            children: [
+              Expanded(child: _BigButton(CupertinoIcons.play_fill, 'Play')),
+              SizedBox(width: 12),
+              Expanded(child: _BigButton(CupertinoIcons.shuffle, 'Shuffle')),
+            ],
+          ),
+          const SizedBox(height: 6),
+        ],
+      ),
+    );
+  }
+}
+
+class _BigButton extends StatelessWidget {
+  const _BigButton(this.icon, this.label);
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoButton(
+      padding: EdgeInsets.zero,
+      borderRadius: BorderRadius.circular(12),
+      color: const Color(0x1FFFFFFF),
+      onPressed: () {},
+      child: SizedBox(
+        height: 48,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 18, color: accent),
+            const SizedBox(width: 8),
             Text(
-              photo.title,
+              label,
               style: const TextStyle(
-                fontSize: 30,
-                height: 1.05,
-                fontWeight: FontWeight.bold,
-                letterSpacing: -0.6,
-                color: CupertinoColors.white,
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -0.3,
+                color: accent,
               ),
             ),
           ],
@@ -195,275 +381,335 @@ class _Header extends StatelessWidget {
   }
 }
 
-class _Panel extends StatelessWidget {
-  const _Panel({
-    required this.technique,
-    required this.height,
-    required this.sigma,
-    required this.effectiveSigma,
-    required this.plateau,
-    required this.effectivePlateau,
-    required this.falloff,
-    required this.blurCurve,
-    required this.tintOpacity,
-    required this.onTechnique,
-    required this.onHeight,
-    required this.onSigma,
-    required this.onPlateau,
-    required this.onFalloff,
-    required this.onBlurCurve,
-    required this.onTintOpacity,
-  });
+class _TrackRow extends StatelessWidget {
+  const _TrackRow({required this.index, required this.track});
 
-  final Technique technique;
-  final double height;
-  final double sigma;
-  final double effectiveSigma;
-  final double plateau;
-  final double effectivePlateau;
-  final double falloff;
-  final double blurCurve;
-  final double tintOpacity;
-  final ValueChanged<Technique> onTechnique;
-  final ValueChanged<double> onHeight;
-  final ValueChanged<double> onSigma;
-  final ValueChanged<double> onPlateau;
-  final ValueChanged<double> onFalloff;
-  final ValueChanged<double> onBlurCurve;
-  final ValueChanged<double> onTintOpacity;
+  final int index;
+  final Track track;
+
+  /// The track the mini player is on gets the system's playing state: accent
+  /// number, and the little level meter instead of a digit.
+  bool get playing => track.title == 'Fog Bank';
 
   @override
   Widget build(BuildContext context) {
-    final capped =
-        effectiveSigma < sigma - 0.01 || effectivePlateau < plateau - 0.005;
-    final width = (height * Haze.transitionFraction(effectivePlateau, falloff))
-        .round();
     return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            width: double.infinity,
-            child: CupertinoSlidingSegmentedControl<Technique>(
-              groupValue: technique,
-              backgroundColor: const Color(0x1FFFFFFF),
-              thumbColor: const Color(0x40FFFFFF),
-              onValueChanged: (v) => v == null ? null : onTechnique(v),
-              children: const {
-                Technique.haze: _Seg('Haze'),
-                Technique.plain: _Seg('BackdropFilter'),
-              },
+      padding: const EdgeInsets.only(left: 20),
+      child: Container(
+        height: 52,
+        padding: const EdgeInsets.only(right: 20),
+        decoration: const BoxDecoration(
+          border: Border(top: BorderSide(color: hairline, width: 0.5)),
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 28,
+              child: playing
+                  ? const Icon(
+                      CupertinoIcons.speaker_2_fill,
+                      size: 14,
+                      color: accent,
+                    )
+                  : Text(
+                      '${index + 1}',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        color: Color(0x80FFFFFF),
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
             ),
-          ),
-          const SizedBox(height: 14),
-
-          // The curve is the whole argument, so it is drawn rather than
-          // described: where the plateau ends, how the fade leans, and that it
-          // reaches zero flat against the far side.
-          ProfileCurve(
-            plateau: effectivePlateau,
-            falloff: falloff,
-            live: technique == Technique.haze,
-          ),
-          const SizedBox(height: 6),
-          Text(
-            technique == Technique.haze
-                ? (capped
-                      ? 'held back to plateau '
-                            '${effectivePlateau.toStringAsFixed(2)} · sigma '
-                            '${effectiveSigma.toStringAsFixed(1)} — '
-                            '${width}pt of transition'
-                      : '${width}pt of transition for '
-                            '${(3 * effectiveSigma).round()}pt of blur reach')
-                : 'one uniform blur, one flat scrim, one hard clip',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 11.5,
-              letterSpacing: 0.1,
-              color: capped && technique == Technique.haze
-                  ? const Color(0xFFFFD37A)
-                  : const Color(0x99FFFFFF),
-            ),
-          ),
-          const SizedBox(height: 10),
-
-          _Slider(
-            label: 'height',
-            value: height,
-            min: 60,
-            max: 420,
-            unit: 'pt',
-            decimals: 0,
-            onChanged: onHeight,
-          ),
-          _Slider(
-            label: 'sigma',
-            value: sigma,
-            min: 0,
-            max: 40,
-            decimals: 1,
-            onChanged: onSigma,
-          ),
-          _Slider(
-            // Free to the top: the ceiling is computed from the span, the
-            // sigma and the falloff, so there is nothing for a slider bound to
-            // second-guess. Push it to 0.99 and the readout shows what the
-            // rectangle could actually give.
-            label: 'plateau',
-            value: plateau,
-            min: 0,
-            max: 0.99,
-            decimals: 2,
-            enabled: technique == Technique.haze,
-            onChanged: onPlateau,
-          ),
-          _Slider(
-            label: 'falloff',
-            value: falloff,
-            min: 0.4,
-            max: 4,
-            decimals: 2,
-            enabled: technique == Technique.haze,
-            onChanged: onFalloff,
-          ),
-          _Slider(
-            // Blur only. 1 puts it back on the tint's curve, which reads as a
-            // slab that suddenly clears — the point of the slider is to see
-            // that.
-            label: 'blur curve',
-            value: blurCurve,
-            min: 1,
-            max: 4,
-            decimals: 2,
-            enabled: technique == Technique.haze,
-            onChanged: onBlurCurve,
-          ),
-          _Slider(
-            label: 'tint',
-            value: tintOpacity,
-            min: 0,
-            max: 1,
-            decimals: 2,
-            onChanged: onTintOpacity,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Seg extends StatelessWidget {
-  const _Seg(this.label);
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 7),
-    child: Text(
-      label,
-      style: const TextStyle(
-        fontSize: 13,
-        fontWeight: FontWeight.w600,
-        color: CupertinoColors.white,
-      ),
-    ),
-  );
-}
-
-class _Slider extends StatelessWidget {
-  const _Slider({
-    required this.label,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.decimals,
-    required this.onChanged,
-    this.unit = '',
-    this.enabled = true,
-  });
-
-  final String label;
-  final double value;
-  final double min;
-  final double max;
-  final int decimals;
-  final String unit;
-  final bool enabled;
-  final ValueChanged<double> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedOpacity(
-      opacity: enabled ? 1 : 0.35,
-      duration: const Duration(milliseconds: 180),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 72,
-            child: Text(
-              label,
-              style: const TextStyle(fontSize: 12.5, color: Color(0xB3FFFFFF)),
-            ),
-          ),
-          Expanded(
-            child: CupertinoSlider(
-              value: value.clamp(min, max),
-              min: min,
-              max: max,
-              activeColor: CupertinoColors.white,
-              onChanged: enabled ? onChanged : null,
-            ),
-          ),
-          SizedBox(
-            width: 52,
-            child: Text(
-              '${value.toStringAsFixed(decimals)}$unit',
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                fontSize: 12.5,
-                fontFeatures: [FontFeature.tabularFigures()],
-                color: CupertinoColors.white,
+            Expanded(
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      track.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 16,
+                        letterSpacing: -0.3,
+                        color: playing ? accent : CupertinoColors.white,
+                      ),
+                    ),
+                  ),
+                  if (track.explicit) ...[
+                    const SizedBox(width: 6),
+                    const _ExplicitBadge(),
+                  ],
+                ],
               ),
             ),
-          ),
-        ],
+            Text(
+              track.duration,
+              style: const TextStyle(
+                fontSize: 15,
+                color: Color(0x66FFFFFF),
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
+            const SizedBox(width: 14),
+            const Icon(
+              CupertinoIcons.ellipsis,
+              size: 17,
+              color: Color(0x66FFFFFF),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// Network photo with a coloured placeholder, so the layout never jumps and
-/// the blur has something to chew on from the first frame.
-class PhotoImage extends StatelessWidget {
-  const PhotoImage({
-    super.key,
-    required this.photo,
-    this.width = 1400,
-    this.fit = BoxFit.cover,
-  });
-
-  final Photo photo;
-  final double width;
-  final BoxFit fit;
+class _ExplicitBadge extends StatelessWidget {
+  const _ExplicitBadge();
 
   @override
   Widget build(BuildContext context) {
-    return ColoredBox(
-      color: photo.placeholder,
-      child: Image.network(
-        photo.url(width),
-        fit: fit,
-        width: double.infinity,
-        height: double.infinity,
-        frameBuilder: (context, child, frame, wasSync) => AnimatedOpacity(
-          opacity: frame == null ? 0 : 1,
-          duration: const Duration(milliseconds: 260),
-          child: child,
+    return Container(
+      width: 14,
+      height: 14,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: const Color(0x59FFFFFF),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: const Text(
+        'E',
+        style: TextStyle(
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+          height: 1.1,
+          color: Color(0xFF1C1C1E),
         ),
-        errorBuilder: (context, _, _) => const SizedBox.expand(),
+      ),
+    );
+  }
+}
+
+class _AlbumFooter extends StatelessWidget {
+  const _AlbumFooter();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(20, 18, 20, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '12 songs · 57 minutes',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0x99FFFFFF),
+                ),
+              ),
+              SizedBox(height: 8),
+              Text(
+                albumNote,
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.45,
+                  color: Color(0x73FFFFFF),
+                ),
+              ),
+              SizedBox(height: 8),
+              Text(
+                albumRelease,
+                style: TextStyle(fontSize: 12, color: Color(0x59FFFFFF)),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 26),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 20),
+          child: Text(
+            'More by $albumArtist',
+            style: TextStyle(
+              fontSize: 21,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.5,
+              color: CupertinoColors.white,
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 190,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            itemCount: related.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 14),
+            itemBuilder: (context, i) {
+              final (title, artist, colors) = related[i];
+              return SizedBox(
+                width: 140,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: SizedBox(
+                        width: 140,
+                        height: 140,
+                        child: Sleeve(colors: colors),
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        letterSpacing: -0.2,
+                        color: CupertinoColors.white,
+                      ),
+                    ),
+                    Text(
+                      artist,
+                      maxLines: 1,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Color(0x8CFFFFFF),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Mini player and tab bar. Both live inside the bottom band, so the list
+/// scrolls up into them and dissolves rather than stopping on a line.
+class _PlayerDock extends StatelessWidget {
+  const _PlayerDock({required this.bottomInset});
+
+  final double bottomInset;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          height: kMiniPlayerHeight,
+          decoration: const BoxDecoration(
+            // The hairline the system keeps even over a blur — it is what
+            // says the dock is a surface and not part of the page.
+            border: Border(
+              top: BorderSide(color: Color(0x26FFFFFF), width: 0.5),
+            ),
+          ),
+          child: Row(
+            children: [
+              const SizedBox(width: 12),
+              const ClipRRect(
+                borderRadius: BorderRadius.all(Radius.circular(6)),
+                child: SizedBox(width: 44, height: 44, child: Sleeve()),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Fog Bank',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 15,
+                        letterSpacing: -0.2,
+                        color: CupertinoColors.white,
+                      ),
+                    ),
+                    Text(
+                      albumArtist,
+                      maxLines: 1,
+                      style: TextStyle(fontSize: 13, color: Color(0x8CFFFFFF)),
+                    ),
+                  ],
+                ),
+              ),
+              const _DockButton(CupertinoIcons.pause_fill),
+              const _DockButton(CupertinoIcons.forward_fill),
+              const SizedBox(width: 10),
+            ],
+          ),
+        ),
+        SizedBox(
+          height: kTabBarHeight,
+          child: Row(
+            children: const [
+              _Tab(CupertinoIcons.house_fill, 'Home'),
+              _Tab(CupertinoIcons.square_grid_2x2_fill, 'New'),
+              _Tab(CupertinoIcons.dot_radiowaves_left_right, 'Radio'),
+              _Tab(CupertinoIcons.music_albums_fill, 'Library', active: true),
+              _Tab(CupertinoIcons.search, 'Search'),
+            ],
+          ),
+        ),
+        SizedBox(height: bottomInset),
+      ],
+    );
+  }
+}
+
+class _DockButton extends StatelessWidget {
+  const _DockButton(this.icon);
+
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoButton(
+      padding: EdgeInsets.zero,
+      minimumSize: const Size(44, 44),
+      onPressed: () {},
+      child: Icon(icon, size: 24, color: CupertinoColors.white),
+    );
+  }
+}
+
+class _Tab extends StatelessWidget {
+  const _Tab(this.icon, this.label, {this.active = false});
+
+  final IconData icon;
+  final String label;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = active ? accent : const Color(0x8CFFFFFF);
+    return Expanded(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 23, color: color),
+          const SizedBox(height: 3),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w500,
+              color: color,
+            ),
+          ),
+        ],
       ),
     );
   }

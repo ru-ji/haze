@@ -33,7 +33,9 @@ The usual trick — a column of `BackdropFilter`s with increasing sigma — has
 visible steps and smears in whatever sits outside the widget. `haze` runs a
 bundled fragment shader in two separable passes (`ui.ImageFilter.shader`), so
 the sigma is a continuous function of the distance to the edge, and sampling
-is clamped to the widget's own rectangle. Bounds are recomputed **at paint
+is walled off at the edge it hugs — where there is nothing behind the effect to
+read — while staying free on the other three sides, so the kernel never goes
+one-sided and the band never differs from the pixels just outside it. Bounds are recomputed **at paint
 time**, so the effect stays correct while a header collapses under a scroll or
 a page slides during a route transition.
 
